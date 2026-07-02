@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -34,8 +35,16 @@
     "cloudflare-workers",
     "orm"
   ],
-  "author": "",
-  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/D4ario0/wae-query.git"
+  },
+  "bugs": {
+    "url": "https://github.com/D4ario0/wae-query/issues"
+  },
+  "homepage": "https://github.com/D4ario0/wae-query#readme",
+  "author": "D4ario0",
+  "license": "MIT",
   "packageManager": "pnpm@11.9.0",
   "devDependencies": {
     "typescript": "^6.0.3"
