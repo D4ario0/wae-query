@@ -1,0 +1,43 @@
+{
+  "name": "wae-query",
+  "version": "0.1.0",
+  "description": "Type-safe SQL query builder for WAE datasets.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm run build && node --test",
+    "prepack": "pnpm run build"
+  },
+  "keywords": [
+    "wae",
+    "cloudflare",
+    "workers",
+    "workers-analytics-engine",
+    "query-builder",
+    "sql",
+    "typescript",
+    "click-house",
+    "cloudflare-workers",
+    "orm"
+  ],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@11.9.0",
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
