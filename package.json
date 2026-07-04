@@ -1,6 +1,6 @@
 {
   "name": "wae-query",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Type-safe SQL query builder for WAE datasets.",
   "type": "module",
   "sideEffects": false,
