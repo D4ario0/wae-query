@@ -32,6 +32,7 @@ import {
   sum,
   toStartOfInterval,
   unsafeRaw,
+  wae,
   WAE_BASE_COLUMNS,
   WAE_BLOB_COLUMNS,
   WAE_DOUBLE_COLUMNS,
@@ -124,9 +125,13 @@ describe("query builder", () => {
   });
 
   it("supports raw expressions and explicit output format", () => {
-    const sql = dataset("events", {}).where(unsafeRaw("status = 'ok'")).toSQL("TabSeparated");
+    const sql = dataset("events", {}).where(wae.raw("status = 'ok'")).toSQL("TabSeparated");
 
     assert.equal(sql, ["SELECT *", "FROM events", "WHERE status = 'ok'", "FORMAT TabSeparated"].join("\n"));
+  });
+
+  it("keeps unsafeRaw as a deprecated alias for wae.raw", () => {
+    assert.equal(unsafeRaw("status = 'ok'").sql, wae.raw("status = 'ok'").sql);
   });
 
   it("validates query inputs", () => {
@@ -490,5 +495,47 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
     assert.throws(() => intervalAgo(-1, "DAY"), /positive number/);
     assert.throws(() => intervalAgo(1, "WEEK"), /Invalid interval unit/);
     assert.throws(() => toStartOfInterval(timestamp, 1, "WEEK"), /Invalid interval unit/);
+  });
+});
+
+describe("dataset-bound sampled helpers", () => {
+  it("binds sampled count, sum, avg, and quantile to the dataset sample interval", () => {
+    const analytics = defineDataset({
+      name: "analytics",
+      doubles: ["requests", "latency"],
+    });
+
+    assert.equal(analytics.sampled.count().sql, "SUM(_sample_interval)");
+    assert.equal(analytics.sampled.sum(analytics.doubles.requests).sql, "SUM(double1 * _sample_interval)");
+    assert.equal(
+      analytics.sampled.avg(analytics.doubles.latency).sql,
+      "SUM(double2 * _sample_interval) / SUM(_sample_interval)",
+    );
+    assert.equal(
+      analytics.sampled.quantile(0.95, analytics.doubles.latency).sql,
+      "quantileExactWeighted(0.95)(double2, _sample_interval)",
+    );
+  });
+
+  it("uses dataset-bound sampled helpers in queries", () => {
+    const analytics = defineDataset({
+      name: "analytics",
+      doubles: ["latency"],
+      indexes: ["tenant"],
+    });
+
+    assert.equal(analytics
+      .select({
+        tenant: analytics.indexes.tenant,
+        requests: analytics.sampled.count(),
+        avg_latency: analytics.sampled.avg(analytics.doubles.latency),
+      })
+      .groupBy(analytics.indexes.tenant)
+      .toSQL(), [
+      "SELECT index1 AS tenant, SUM(_sample_interval) AS requests, SUM(double1 * _sample_interval) / SUM(_sample_interval) AS avg_latency",
+      "FROM analytics",
+      "GROUP BY index1",
+      "FORMAT JSON",
+    ].join("\n"));
   });
 });

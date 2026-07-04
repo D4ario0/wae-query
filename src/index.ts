@@ -99,8 +99,15 @@ export type Column<
   readonly name: SQLName;
 };
 
-type Selectable = Column | Expr;
+export type Selectable = Column | Expr;
 type ValueExpr = Selectable | Scalar;
+
+export type SampledHelpers = {
+  count(): Expr<number>;
+  sum(value: Selectable): Expr<number>;
+  avg(value: Selectable): Expr<number>;
+  quantile(quantile: number, value: Selectable): Expr<number>;
+};
 
 type DatasetColumns<T extends Record<string, string>> = {
   readonly [K in keyof T]: Column<unknown, T[K]>;
@@ -148,6 +155,7 @@ export type DefinedDataset<
   readonly dataset: Column<string, "dataset">;
   readonly timestamp: Column<Date, "timestamp">;
   readonly sampleInterval: Column<number, "_sample_interval">;
+  readonly sampled: SampledHelpers;
   readonly blobs: ColumnsForNames<TBlobs, WAEBlobColumnName>;
   readonly doubles: ColumnsForNames<TDoubles, WAEDoubleColumnName>;
   readonly indexes: ColumnsForNames<TIndexes, WAEIndexColumnName>;
@@ -242,12 +250,32 @@ function sqlExpr<T = unknown>(sql: string): Expr<T> {
   return { sql };
 }
 
-function valueExpr(value: ValueExpr): Expr {
-  return isSQLNode(value) ? value : sqlExpr(lit(value));
+export function wae<T = unknown>(
+  strings: TemplateStringsArray,
+  ...values: Array<Selectable | Scalar>
+): Expr<T> {
+  let out = strings[0] ?? "";
+
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i]!;
+    out += isSQLNode(value) ? value.sql : lit(value);
+    out += strings[i + 1] ?? "";
+  }
+
+  return sqlExpr<T>(out);
 }
 
+export namespace wae {
+  export function raw(sql: string): Expr {
+    return sqlExpr(sql);
+  }
+}
+
+/**
+ * @deprecated Use `wae.raw(sql)` instead.
+ */
 export function unsafeRaw(sql: string): Expr {
-  return sqlExpr(sql);
+  return wae.raw(sql);
 }
 
 export function col<T = unknown, SQLName extends string = string>(
@@ -325,6 +353,18 @@ export function defineDataset<
   });
 
   const baseDataset = dataset(definition.name, columnsFlat);
+  const datasetColumn = col<string, "dataset">(WAE_BASE_COLUMNS.dataset);
+  const timestamp = col<Date, "timestamp">(WAE_BASE_COLUMNS.timestamp);
+  const sampleInterval = col<number, "_sample_interval">(
+    WAE_BASE_COLUMNS.sampleInterval,
+  );
+  const sampled = {
+    count: () => sampledCount(sampleInterval),
+    sum: (value: Selectable) => sampledSum(value, sampleInterval),
+    avg: (value: Selectable) => sampledAvg(value, sampleInterval),
+    quantile: (quantile: number, value: Selectable) =>
+      quantileExactWeighted(quantile, value, sampleInterval),
+  } satisfies SampledHelpers;
 
   for (const name of blobs as readonly TBlobs[number][]) {
     blobColumns[name] = baseDataset[`blobs_${name}`] as Column<
@@ -348,11 +388,10 @@ export function defineDataset<
   return {
     name: definition.name,
     fields: { blobs, doubles, indexes },
-    dataset: col<string, "dataset">(WAE_BASE_COLUMNS.dataset),
-    timestamp: col<Date, "timestamp">(WAE_BASE_COLUMNS.timestamp),
-    sampleInterval: col<number, "_sample_interval">(
-      WAE_BASE_COLUMNS.sampleInterval,
-    ),
+    dataset: datasetColumn,
+    timestamp,
+    sampleInterval,
+    sampled,
     blobs: blobColumns,
     doubles: doubleColumns,
     indexes: indexColumns,
@@ -436,7 +475,7 @@ export class Query<SelectedAliases extends string = never> {
   }
 
   orderBy(
-    expression: Column | Expr | SelectedAliases | string,
+    expression: Column | Expr | SelectedAliases,
     direction: OrderDirection = "ASC",
   ) {
     const expr =
@@ -496,27 +535,27 @@ export function lit(value: Scalar): string {
 }
 
 export function eq(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} = ${valueExpr(right).sql}`);
+  return wae`${left} = ${right}`;
 }
 
 export function ne(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} != ${valueExpr(right).sql}`);
+  return wae`${left} != ${right}`;
 }
 
 export function gt(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} > ${valueExpr(right).sql}`);
+  return wae`${left} > ${right}`;
 }
 
 export function gte(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} >= ${valueExpr(right).sql}`);
+  return wae`${left} >= ${right}`;
 }
 
 export function lt(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} < ${valueExpr(right).sql}`);
+  return wae`${left} < ${right}`;
 }
 
 export function lte(left: Selectable, right: ValueExpr): Expr<boolean> {
-  return sqlExpr(`${left.sql} <= ${valueExpr(right).sql}`);
+  return wae`${left} <= ${right}`;
 }
 
 export function and(
@@ -538,11 +577,11 @@ export function or(...expressions: Array<Expr<boolean> | Expr>): Expr<boolean> {
 }
 
 export function like(left: Selectable, pattern: string): Expr<boolean> {
-  return sqlExpr(`${left.sql} LIKE ${lit(pattern)}`);
+  return wae`${left} LIKE ${pattern}`;
 }
 
 export function ilike(left: Selectable, pattern: string): Expr<boolean> {
-  return sqlExpr(`${left.sql} ILIKE ${lit(pattern)}`);
+  return wae`${left} ILIKE ${pattern}`;
 }
 
 export function inList(left: Selectable, values: Scalar[]): Expr<boolean> {
@@ -566,20 +605,20 @@ export function intervalAgo(amount: number, unit: IntervalUnit): Expr<Date> {
 }
 
 export function sum(value: Selectable): Expr<number> {
-  return sqlExpr(`SUM(${value.sql})`);
+  return wae`SUM(${value})`;
 }
 
 export function avg(value: Selectable): Expr<number> {
-  return sqlExpr(`AVG(${value.sql})`);
+  return wae`AVG(${value})`;
 }
 
 export function count(value?: Selectable): Expr<number> {
   if (!value) return sqlExpr("COUNT()");
-  return sqlExpr(`COUNT(${value.sql})`);
+  return wae`COUNT(${value})`;
 }
 
 export function countDistinct(value: Selectable): Expr<number> {
-  return sqlExpr(`COUNT(DISTINCT ${value.sql})`);
+  return wae`COUNT(DISTINCT ${value})`;
 }
 
 export function toStartOfInterval(
@@ -603,8 +642,8 @@ export function formatDateTime(
   format: string,
   timezone?: string,
 ): Expr<string> {
-  const tz = timezone ? `, ${lit(timezone)}` : "";
-  return sqlExpr(`formatDateTime(${value.sql}, ${lit(format)}${tz})`);
+  if (!timezone) return wae`formatDateTime(${value}, ${format})`;
+  return wae`formatDateTime(${value}, ${format}, ${timezone})`;
 }
 
 export function dateBucket(
@@ -629,16 +668,14 @@ export function sampledSum(
   value: Selectable,
   sampleInterval: Selectable,
 ): Expr<number> {
-  return sqlExpr(`SUM(${value.sql} * ${sampleInterval.sql})`);
+  return wae`SUM(${value} * ${sampleInterval})`;
 }
 
 export function sampledAvg(
   value: Selectable,
   sampleInterval: Selectable,
 ): Expr<number> {
-  return sqlExpr(
-    `SUM(${value.sql} * ${sampleInterval.sql}) / SUM(${sampleInterval.sql})`,
-  );
+  return wae`SUM(${value} * ${sampleInterval}) / SUM(${sampleInterval})`;
 }
 
 export function quantileExactWeighted(
