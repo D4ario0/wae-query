@@ -102,6 +102,15 @@ export type Column<
 export type Selectable = Column | Expr;
 type ValueExpr = Selectable | Scalar;
 
+/** Expected application values, not validated HTTP response values. */
+export type SelectedRow<Fields extends Record<string, Selectable>> = {
+  [Key in keyof Fields as Key extends string | number ? Key : never]:
+    Fields[Key] extends SQLNode<infer Value> ? Value : unknown;
+};
+
+/** Optional extraction; executors can infer Row directly from Query<Row>. */
+export type InferRow<Q extends Query<unknown>> = Q["$inferRow"];
+
 export type SampledHelpers = {
   count(): Expr<number>;
   sum(value: Selectable): Expr<number>;
@@ -117,8 +126,8 @@ export type Dataset<T extends Record<string, string>> = {
   readonly table: string;
   select<TFields extends Record<string, Selectable>>(
     fields: TFields,
-  ): Query<Extract<keyof TFields, string>>;
-  where(expression: Expr<boolean> | Expr): Query<never>;
+  ): Query<SelectedRow<TFields>>;
+  where(expression: Expr<boolean> | Expr): Query<unknown>;
 } & DatasetColumns<T>;
 
 type WAEFieldNames = readonly string[];
@@ -137,8 +146,9 @@ export type WAEDatasetDefinition<
 type ColumnsForNames<
   T extends readonly string[],
   TColumnName extends string,
+  Value,
 > = {
-  [K in T[number]]: Column<unknown, TColumnName>;
+  [K in T[number]]: Column<Value, TColumnName>;
 };
 
 export type DefinedDataset<
@@ -156,13 +166,13 @@ export type DefinedDataset<
   readonly timestamp: Column<Date, "timestamp">;
   readonly sampleInterval: Column<number, "_sample_interval">;
   readonly sampled: SampledHelpers;
-  readonly blobs: ColumnsForNames<TBlobs, WAEBlobColumnName>;
-  readonly doubles: ColumnsForNames<TDoubles, WAEDoubleColumnName>;
-  readonly indexes: ColumnsForNames<TIndexes, WAEIndexColumnName>;
+  readonly blobs: ColumnsForNames<TBlobs, WAEBlobColumnName, string>;
+  readonly doubles: ColumnsForNames<TDoubles, WAEDoubleColumnName, number>;
+  readonly indexes: ColumnsForNames<TIndexes, WAEIndexColumnName, string>;
   select<TFields extends Record<string, Selectable>>(
     fields: TFields,
-  ): Query<Extract<keyof TFields, string>>;
-  where(expression: Expr<boolean> | Expr): Query<never>;
+  ): Query<SelectedRow<TFields>>;
+  where(expression: Expr<boolean> | Expr): Query<unknown>;
   dataPoint(values: {
     blobs: { [K in TBlobs[number]]: WAEDataPointValue };
     doubles: { [K in TDoubles[number]]: number };
@@ -173,6 +183,27 @@ export type DefinedDataset<
     indexes: WAEDataPointValue[];
   };
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeDateTime(value: unknown, name: string): Date {
+  // Unzoned SQL timestamps are interpreted as UTC, never host-local time.
+  if (typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z?$/.test(value)) {
+    throw new Error(`Invalid DateTime value for column: ${name}`);
+  }
+  const normalized = value.replace(" ", "T").replace(/Z$/, "");
+  const [seconds, fraction = ""] = normalized.split(".");
+  const iso = `${seconds}.${fraction.padEnd(3, "0")}Z`;
+  const date = new Date(iso);
+  // Reject calendar overflow (for example February 30), not just Invalid Date.
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== iso) {
+    throw new Error(`Invalid DateTime value for column: ${name}`);
+  }
+  return date;
+}
 
 const IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -335,9 +366,9 @@ export function defineDataset<
   validateFieldNames("indexes", indexes);
 
   const columnsFlat: Record<string, string> = {};
-  const blobColumns = {} as ColumnsForNames<TBlobs, WAEBlobColumnName>;
-  const doubleColumns = {} as ColumnsForNames<TDoubles, WAEDoubleColumnName>;
-  const indexColumns = {} as ColumnsForNames<TIndexes, WAEIndexColumnName>;
+  const blobColumns = {} as ColumnsForNames<TBlobs, WAEBlobColumnName, string>;
+  const doubleColumns = {} as ColumnsForNames<TDoubles, WAEDoubleColumnName, number>;
+  const indexColumns = {} as ColumnsForNames<TIndexes, WAEIndexColumnName, string>;
 
   blobs.forEach((name, i) => {
     const columnName = `blob${i + 1}` as WAEBlobColumnName;
@@ -368,19 +399,19 @@ export function defineDataset<
 
   for (const name of blobs as readonly TBlobs[number][]) {
     blobColumns[name] = baseDataset[`blobs_${name}`] as Column<
-      unknown,
+      string,
       WAEBlobColumnName
     >;
   }
   for (const name of doubles as readonly TDoubles[number][]) {
     doubleColumns[name] = baseDataset[`doubles_${name}`] as Column<
-      unknown,
+      number,
       WAEDoubleColumnName
     >;
   }
   for (const name of indexes as readonly TIndexes[number][]) {
     indexColumns[name] = baseDataset[`indexes_${name}`] as Column<
-      unknown,
+      string,
       WAEIndexColumnName
     >;
   }
@@ -428,75 +459,138 @@ export function defineDataset<
   };
 }
 
-export class Query<SelectedAliases extends string = never> {
+export class Query<Row = unknown> {
+  /** Type-only expected row. No runtime value or decoding is provided. */
+  declare readonly $inferRow: Row;
   private selects: string[] = [];
   private wheres: string[] = [];
   private groups: string[] = [];
   private havings: string[] = [];
   private orders: string[] = [];
-  private limitValue?: number | "ALL";
-  private outputFormat?: WAEFormat;
+  private limitValue: number | "ALL" | undefined;
+  private outputFormat: WAEFormat | undefined;
 
   constructor(private readonly table: string) {
     safeIdent(table);
   }
 
+  private copy<NextRow = Row>(): Query<NextRow> {
+    const query = new Query<NextRow>(this.table);
+    query.selects = [...this.selects];
+    query.wheres = [...this.wheres];
+    query.groups = [...this.groups];
+    query.havings = [...this.havings];
+    query.orders = [...this.orders];
+    query.limitValue = this.limitValue;
+    query.outputFormat = this.outputFormat;
+    return query;
+  }
+
   select<T extends Record<string, Selectable>>(
     fields: T,
-  ): Query<Extract<keyof T, string>> {
+  ): Query<SelectedRow<T>> {
     const entries = Object.entries(fields);
     if (entries.length === 0) {
       throw new Error("select() requires at least one field");
     }
 
-    this.selects = entries.map(
+    const query = this.copy<SelectedRow<T>>();
+    query.selects = entries.map(
       ([alias, value]) => `${sqlOf(value)} AS ${safeIdent(alias)}`,
     );
-    return this as unknown as Query<Extract<keyof T, string>>;
+    return query;
   }
 
-  where(expression: Expr<boolean> | Expr) {
-    this.wheres.push(expression.sql);
-    return this;
+  where(expression: Expr<boolean> | Expr): Query<Row> {
+    const query = this.copy();
+    query.wheres.push(expression.sql);
+    return query;
   }
 
-  groupBy(...columns: Array<Column | Expr | string>) {
-    this.groups.push(
+  groupBy(...columns: Array<Column | Expr | string>): Query<Row> {
+    const query = this.copy();
+    query.groups.push(
       ...columns.map((column) =>
         typeof column === "string" ? safeIdent(column) : column.sql,
       ),
     );
-    return this;
+    return query;
   }
 
-  having(expression: Expr<boolean> | Expr) {
-    this.havings.push(expression.sql);
-    return this;
+  having(expression: Expr<boolean> | Expr): Query<Row> {
+    const query = this.copy();
+    query.havings.push(expression.sql);
+    return query;
   }
 
   orderBy(
-    expression: Column | Expr | SelectedAliases,
+    expression: Column | Expr | Extract<keyof Row, string>,
     direction: OrderDirection = "ASC",
-  ) {
+  ): Query<Row> {
     const expr =
       typeof expression === "string" ? safeIdent(expression) : expression.sql;
-    this.orders.push(`${expr} ${safeOrderDirection(direction)}`);
-    return this;
+    const query = this.copy();
+    query.orders.push(`${expr} ${safeOrderDirection(direction)}`);
+    return query;
   }
 
-  limit(value: number | "ALL") {
-    if (value === "ALL") {
-      this.limitValue = "ALL";
-      return this;
+  limit(value: number | "ALL"): Query<Row> {
+    const query = this.copy();
+    query.limitValue = value === "ALL" ? value : safeInt(value, "limit");
+    return query;
+  }
+
+  format(value: WAEFormat): Query<Row> {
+    const query = this.copy();
+    query.outputFormat = safeFormat(value);
+    return query;
+  }
+
+  /** Decode a parsed FORMAT JSON envelope. Only DateTime values are converted.
+   * Other values retain the trusted Row contract; this is not row validation.
+   */
+  decodeJSON(payload: unknown): Row[] {
+    if (!isRecord(payload) || !Array.isArray(payload.meta) || !Array.isArray(payload.data)) {
+      throw new Error("Expected a FORMAT JSON response with meta and data arrays");
     }
 
-    this.limitValue = safeInt(value, "limit");
-    return this;
-  }
+    const names = new Set<string>();
+    const dates: Array<{ name: string; nullable: boolean }> = [];
+    for (const column of payload.meta) {
+      if (!isRecord(column) || typeof column.name !== "string" ||
+        typeof column.type !== "string" || names.has(column.name)) {
+        throw new Error("Invalid FORMAT JSON column metadata");
+      }
+      names.add(column.name);
+      const nullable = column.type.startsWith("Nullable(") && column.type.endsWith(")");
+      const type = nullable ? column.type.slice(9, -1) : column.type;
+      if (type === "DateTime" || type === "DateTime('UTC')" || type === "DateTime('Etc/UTC')") {
+        dates.push({ name: column.name, nullable });
+      } else if (type.startsWith("DateTime")) {
+        throw new Error(`Unsupported DateTime metadata type: ${column.type}`);
+      }
+    }
 
-  format(value: WAEFormat) {
-    this.outputFormat = safeFormat(value);
-    return this;
+    return payload.data.map((row: unknown) => {
+      if (!isRecord(row)) {
+        throw new Error("Expected a FORMAT JSON row object");
+      }
+      const decoded = { ...row };
+      for (const { name, nullable } of dates) {
+        if (!Object.hasOwn(row, name)) {
+          throw new Error(`Missing DateTime column: ${name}`);
+        }
+        const value = row[name];
+        // Define an own data property even for aliases such as __proto__.
+        Object.defineProperty(decoded, name, {
+          value: nullable && value === null ? null : decodeDateTime(value, name),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return decoded as Row;
+    });
   }
 
   toSQL(format: WAEFormat = this.outputFormat ?? "JSON") {
