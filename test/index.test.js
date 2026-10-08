@@ -39,6 +39,8 @@ import {
   WAE_INDEX_COLUMNS,
 } from "../dist/index.js";
 
+const asBindingResponse = (data) => ({ data, rows: data.length, statistics: { elapsed_ms: 1, rows_read: data.length, bytes_read: 0 } });
+
 describe("literals and identifiers", () => {
   it("escapes scalar SQL literals", () => {
     assert.equal(lit(null), "NULL");
@@ -106,7 +108,6 @@ describe("query builder", () => {
       .having(gt(count(), 1))
       .orderBy("total", "DESC")
       .limit(10)
-      .format("JSONEachRow")
       .toSQL();
 
     assert.equal(
@@ -119,15 +120,32 @@ describe("query builder", () => {
         "HAVING COUNT() > 1",
         "ORDER BY total DESC",
         "LIMIT 10",
-        "FORMAT JSONEachRow",
       ].join("\n"),
     );
   });
 
-  it("supports raw expressions and explicit output format", () => {
-    const sql = dataset("events", {}).where(wae.raw("status = 'ok'")).toSQL("TabSeparated");
+  it("never appends a FORMAT clause (the binding rejects one)", () => {
+    const sql = dataset("events", {}).where(wae.raw("status = 'ok'")).toSQL();
 
-    assert.equal(sql, ["SELECT *", "FROM events", "WHERE status = 'ok'", "FORMAT TabSeparated"].join("\n"));
+    assert.equal(sql, ["SELECT *", "FROM events", "WHERE status = 'ok'"].join("\n"));
+    assert.doesNotMatch(sql, /FORMAT/);
+  });
+
+  it("accepts schema-qualified binding dataset paths", () => {
+    const sql = dataset('events.analyticsEngine."example-dataset"', { status: "status" })
+      .select({ status: col("status") })
+      .toSQL();
+
+    assert.equal(sql, [
+      "SELECT status AS status",
+      'FROM events.analyticsEngine."example-dataset"',
+    ].join("\n"));
+  });
+
+  it("rejects malformed schema-qualified dataset paths", () => {
+    assert.throws(() => dataset("events.", {}), /Invalid SQL table identifier/);
+    assert.throws(() => dataset('events."unterminated', {}), /Invalid SQL table identifier/);
+    assert.throws(() => dataset("events..analyticsEngine", {}), /Invalid SQL table identifier/);
   });
 
   it("keeps unsafeRaw as a deprecated alias for wae.raw", () => {
@@ -137,12 +155,11 @@ describe("query builder", () => {
   it("validates query inputs", () => {
     const events = dataset("events", { status: "status" });
 
-    assert.throws(() => dataset("bad-name", {}), /Invalid SQL identifier/);
+    assert.throws(() => dataset("bad-name", {}), /Invalid SQL table identifier/);
     assert.throws(() => events.select({}), /select\(\) requires at least one field/);
     assert.throws(() => events.select({ "bad-alias": events.status }), /Invalid SQL identifier/);
     assert.throws(() => events.select({ status: events.status }).orderBy("status", "DOWN"), /Invalid order direction/);
     assert.throws(() => events.select({ status: events.status }).limit(-1), /non-negative integer/);
-    assert.throws(() => events.select({ status: events.status }).format("CSV"), /Invalid WAE format/);
   });
 });
 
@@ -259,7 +276,6 @@ describe("additional public API behavior", () => {
       "SELECT *",
       "FROM events",
       "WHERE status = 'ok'",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -273,7 +289,6 @@ describe("additional public API behavior", () => {
       "SELECT *",
       "FROM events",
       "WHERE status = 'ok' AND duration > 100",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -287,7 +302,6 @@ describe("additional public API behavior", () => {
       "SELECT toStartOfHour(timestamp) AS bucket",
       "FROM events",
       "GROUP BY bucket, timezone",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -301,7 +315,6 @@ describe("additional public API behavior", () => {
       "SELECT SUM(duration) AS total",
       "FROM events",
       "ORDER BY SUM(duration) DESC",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -312,17 +325,6 @@ describe("additional public API behavior", () => {
       "SELECT status AS status",
       "FROM events",
       "LIMIT ALL",
-      "FORMAT JSON",
-    ].join("\n"));
-  });
-
-  it("allows toSQL() to override a previously configured format", () => {
-    const events = dataset("events", { status: "status" });
-
-    assert.equal(events.select({ status: events.status }).format("JSONEachRow").toSQL("TabSeparated"), [
-      "SELECT status AS status",
-      "FROM events",
-      "FORMAT TabSeparated",
     ].join("\n"));
   });
 
@@ -432,7 +434,6 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
       "FROM temperatures",
       "WHERE timestamp > NOW() - INTERVAL '7' DAY",
       "GROUP BY index1",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -455,7 +456,6 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
       "FROM temperatures",
       "WHERE timestamp > NOW() - INTERVAL '7' DAY",
       "GROUP BY index1",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -483,7 +483,6 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
       "SELECT status AS status",
       "FROM events",
       "LIMIT 0",
-      "FORMAT JSON",
     ].join("\n"));
   });
 
@@ -535,7 +534,6 @@ describe("dataset-bound sampled helpers", () => {
       "SELECT index1 AS tenant, SUM(_sample_interval) AS requests, SUM(double1 * _sample_interval) / SUM(_sample_interval) AS avg_latency",
       "FROM analytics",
       "GROUP BY index1",
-      "FORMAT JSON",
     ].join("\n"));
   });
 });
@@ -547,8 +545,7 @@ describe("immutable query branches", () => {
     .groupBy("status")
     .having(gt(count(), 1))
     .orderBy("total", "DESC")
-    .limit(10)
-    .format("JSONEachRow");
+    .limit(10);
   const originalSQL = base.toSQL();
 
   for (const [name, change, clause] of [
@@ -558,7 +555,6 @@ describe("immutable query branches", () => {
     ["having", q => q.having(gt(count(), 3)), "HAVING COUNT() > 1 AND COUNT() > 3"],
     ["orderBy", q => q.orderBy("status"), "ORDER BY total DESC, status ASC"],
     ["limit", q => q.limit("ALL"), "LIMIT ALL"],
-    ["format", q => q.format("TabSeparated"), "FORMAT TabSeparated"],
   ]) {
     it(`${name} creates an independent query and preserves other clauses`, () => {
       const branch = change(base);
@@ -576,18 +572,17 @@ describe("immutable query branches", () => {
     const second = first.select({ second: count() });
     const third = second.where(eq(events.blobs.status, "error"))
       .groupBy(events.blobs.status).having(gt(count(), 0)).orderBy("second");
-    assert.equal(first.toSQL(), "SELECT blob1 AS first\nFROM events\nFORMAT JSON");
-    assert.equal(second.toSQL(), "SELECT COUNT() AS second\nFROM events\nFORMAT JSON");
+    assert.equal(first.toSQL(), "SELECT blob1 AS first\nFROM events");
+    assert.equal(second.toSQL(), "SELECT COUNT() AS second\nFROM events");
     assert.match(third.toSQL(), /WHERE blob1 = 'error'/);
     assert.equal(second.toSQL().includes("WHERE"), false);
   });
 
-  it("keeps unselected queries and output format overrides unchanged", () => {
+  it("keeps unselected queries unchanged", () => {
     const unselected = events.where(eq(events.blobs.status, "ok"));
     const selected = unselected.select({ total: count() });
     assert.match(unselected.toSQL(), /^SELECT \*/);
     assert.match(selected.toSQL(), /^SELECT COUNT\(\) AS total/);
-    assert.match(base.toSQL("JSON"), /FORMAT JSON$/);
     assert.equal(base.toSQL(), originalSQL);
   });
 
@@ -599,56 +594,39 @@ describe("immutable query branches", () => {
   });
 });
 
-describe("JSON DateTime decoding", () => {
+describe("binding response DateTime decoding", () => {
   const events = defineDataset({ name: "events" });
   const query = events.select({ recordedAt: events.timestamp });
-  const envelope = (value, type = "DateTime", name = "recordedAt") => ({
-    meta: [{ name, type }], data: [{ [name]: value }], rows: 1,
+  const envelope = (value, name = "recordedAt") => asBindingResponse([{ [name]: value }]);
+
+  it("passes rows through unchanged when no date columns are declared", () => {
+    const payload = envelope("2026-01-02 03:04:05");
+    const rows = query.decodeJSON(payload);
+    assert.equal(rows, payload.data);
+    assert.equal(rows[0].recordedAt, "2026-01-02 03:04:05");
   });
 
-  it("decodes aliased timestamps and leaves the response unchanged", () => {
-    const payload = envelope("2026-01-02 03:04:05");
+  it("decodes only the declared columns, leaving the response unchanged", () => {
+    const payload = asBindingResponse([{ recordedAt: "2026-01-02 03:04:05", status: "ok" }]);
     Object.freeze(payload.data[0]);
-    const rows = query.decodeJSON(payload);
+    const rows = query.decodeJSON(payload, ["recordedAt"]);
     assert.ok(rows[0].recordedAt instanceof Date);
     assert.equal(rows[0].recordedAt.toISOString(), "2026-01-02T03:04:05.000Z");
+    assert.equal(rows[0].status, "ok");
     assert.equal(payload.data[0].recordedAt, "2026-01-02 03:04:05");
     assert.notEqual(rows[0], payload.data[0]);
     assert.notEqual(rows, payload.data);
   });
 
-  it("uses metadata, not alias names or string contents", () => {
-    const payload = {
-      meta: [
-        { name: "timestamp", type: "String" },
-        { name: "bucket", type: "String" },
-        { name: "start", type: "DateTime" },
-        { name: "total", type: "UInt64" },
-      ],
-      data: [{ timestamp: "2026-01-02 03:04:05", bucket: "2026-01-02",
-        start: "2026-01-02 00:00:00", total: "123" }],
-    };
-    const [row] = query.decodeJSON(payload);
-    assert.equal(row.timestamp, payload.data[0].timestamp);
-    assert.equal(row.bucket, "2026-01-02");
-    assert.equal(row.start.toISOString(), "2026-01-02T00:00:00.000Z");
-    assert.equal(row.total, "123"); // Date decoding does not normalize numbers.
-  });
-
-  it("supports explicit UTC metadata and ISO UTC strings", () => {
-    for (const type of ["DateTime", "DateTime('UTC')", "DateTime('Etc/UTC')"]) {
-      for (const value of ["2024-02-29 23:59:59.12", "2024-02-29T23:59:59.120Z"]) {
-        assert.equal(query.decodeJSON(envelope(value, type))[0].recordedAt.toISOString(),
-          "2024-02-29T23:59:59.120Z");
-      }
+  it("supports UTC strings, rejecting ambiguous or non-UTC inputs", () => {
+    for (const value of ["2024-02-29 23:59:59.12", "2024-02-29T23:59:59.120Z"]) {
+      assert.equal(query.decodeJSON(envelope(value), ["recordedAt"])[0].recordedAt.toISOString(),
+        "2024-02-29T23:59:59.120Z");
     }
   });
 
-  it("preserves null only for nullable metadata", () => {
-    assert.equal(query.decodeJSON(envelope(null, "Nullable(DateTime)"))[0].recordedAt, null);
-    assert.equal(query.decodeJSON(envelope("2026-01-02 03:04:05", "Nullable(DateTime('UTC'))"))
-      [0].recordedAt.toISOString(), "2026-01-02T03:04:05.000Z");
-    assert.throws(() => query.decodeJSON(envelope(null)), /Invalid DateTime/);
+  it("treats a null declared column as null, not an error", () => {
+    assert.equal(query.decodeJSON(envelope(null), ["recordedAt"])[0].recordedAt, null);
   });
 
   it("rejects invalid dates, ambiguous inputs, and sub-millisecond precision", () => {
@@ -656,44 +634,33 @@ describe("JSON DateTime decoding", () => {
       "2026-02-30 00:00:00", "2026-13-01 00:00:00", "2026-01-01 24:00:00",
       "2026-01-01 00:60:00", "2026-01-01 00:00:60", "2026-01-01",
       "2026-01-01T00:00:00+02:00", "2026-01-01 00:00:00.123456"]) {
-      assert.throws(() => query.decodeJSON(envelope(value)), /Invalid DateTime/);
+      assert.throws(() => query.decodeJSON(envelope(value), ["recordedAt"]), /Invalid DateTime/);
     }
   });
 
-  it("rejects unsupported timezone and DateTime64 metadata instead of guessing", () => {
-    for (const type of ["DateTime('America/New_York')", "DateTime64(3)",
-      "Nullable(DateTime('Europe/London'))"]) {
-      assert.throws(() => query.decodeJSON(envelope("2026-01-01 00:00:00", type)), /Unsupported DateTime/);
-    }
-  });
-
-  it("validates the envelope, metadata, rows, and missing DateTime values", () => {
-    for (const payload of [null, [], "{}", {}, { data: [] }, { meta: [] },
-      { meta: null, data: [] }, { meta: [], data: {} }]) {
-      assert.throws(() => query.decodeJSON(payload), /Expected a FORMAT JSON response/);
-    }
-    for (const meta of [[null], [{}], [{ name: "x", type: 1 }],
-      [{ name: "x", type: "String" }, { name: "x", type: "DateTime" }]]) {
-      assert.throws(() => query.decodeJSON({ meta, data: [] }), /Invalid FORMAT JSON column metadata/);
+  it("validates the response shape and missing declared columns", () => {
+    for (const payload of [null, [], "{}", {}, { rows: 0 }]) {
+      assert.throws(() => query.decodeJSON(payload), /Expected a binding response with a data array/);
     }
     for (const row of [null, [], "row", 1]) {
-      assert.throws(() => query.decodeJSON({ meta: [], data: [row] }), /row object/);
+      assert.throws(() => query.decodeJSON(asBindingResponse([row]), ["recordedAt"]), /row object/);
     }
-    const payload = envelope("2026-01-01 00:00:00");
-    payload.data = [{}];
-    assert.throws(() => query.decodeJSON(payload), /Missing DateTime column/);
+    assert.throws(() => query.decodeJSON(asBindingResponse([{}]), ["recordedAt"]), /Missing DateTime column/);
   });
 
-  it("supports empty results and unselected queries without changing configured formats", () => {
-    assert.deepEqual(query.decodeJSON({ meta: [{ name: "recordedAt", type: "DateTime" }], data: [] }), []);
-    const unselected = events.where(wae`true`).format("TabSeparated");
+  it("supports empty results and unselected queries", () => {
+    assert.deepEqual(query.decodeJSON(asBindingResponse([]), ["recordedAt"]), []);
+    const unselected = events.where(wae`true`);
     const sql = unselected.toSQL();
-    assert.equal(unselected.decodeJSON(envelope("2026-01-01 00:00:00"))[0].recordedAt.getUTCFullYear(), 2026);
+    assert.equal(
+      unselected.decodeJSON(envelope("2026-01-01 00:00:00"), ["recordedAt"])[0].recordedAt.getUTCFullYear(),
+      2026,
+    );
     assert.equal(unselected.toSQL(), sql);
   });
 
   it("handles special aliases without altering object prototypes", () => {
-    const [row] = query.decodeJSON(envelope("2026-01-01 00:00:00", "DateTime", "__proto__"));
+    const [row] = query.decodeJSON(envelope("2026-01-01 00:00:00", "__proto__"), ["__proto__"]);
     assert.equal(Object.getPrototypeOf(row), Object.prototype);
     assert.equal(Object.hasOwn(row, "__proto__"), true);
     assert.ok(row.__proto__ instanceof Date);

@@ -98,17 +98,6 @@ type Helpers = Expect<Equal<InferRow<typeof helpers>, {
   sum: number; avg: number; quantile: number; formatted: string; start: Date; ago: Date;
 }>>;
 
-const json = chained.format("JSON");
-const lines = chained.format("JSONEachRow");
-const tsv = chained.format("TabSeparated");
-type JSONRow = Expect<Equal<InferRow<typeof json>, Expected>>;
-type LinesRow = Expect<Equal<InferRow<typeof lines>, Expected>>;
-type TSVRow = Expect<Equal<InferRow<typeof tsv>, Expected>>;
-// Formats describe serialization, not a decoder. A JSON executor overrides them.
-json.toSQL("JSON"); lines.toSQL("JSON"); tsv.toSQL("JSON");
-// @ts-expect-error unsupported format
-chained.format("CSV");
-
 const point = visits.dataPoint({
   blobs: { visitor_id: new ArrayBuffer(1) },
   doubles: { latency: 5 }, indexes: { event_id: null },
@@ -123,19 +112,19 @@ visits.dataPoint({
   doubles: { latency: "slow" },
 });
 
-// Decoding preserves inference through a real generic executor implementation.
+// Decoding preserves inference through the real AnalyticsSQLBinding type.
+declare const env: { ANALYTICS_SQL: AnalyticsSQLBinding };
 async function decodingExecutor<Row>(query: Query<Row>): Promise<Row[]> {
-  const response = await fetch("https://example.invalid/sql", {
-    method: "POST", body: query.toSQL("JSON"),
-  });
-  if (!response.ok) throw new Error("SQL request failed");
-  return query.decodeJSON(await response.json());
+  const response = await env.ANALYTICS_SQL.query({ query: query.toSQL() });
+  return query.decodeJSON(response);
 }
-const decoded = selected.decodeJSON({ meta: [], data: [] });
+const decoded = selected.decodeJSON({ data: [] }, ["timestamp"]);
 type Decoded = Expect<Equal<typeof decoded, Expected[]>>;
 const executedDecoded = decodingExecutor(selected);
 type ExecutedDecoded = Expect<Equal<Awaited<typeof executedDecoded>, Expected[]>>;
-const decodedUnknown = unselected.decodeJSON({ meta: [], data: [] });
+const decodedUnknown = unselected.decodeJSON({ data: [] });
 type DecodedUnknown = Expect<Equal<typeof decodedUnknown, unknown[]>>;
 // @ts-expect-error decoded Date is not a string
 const invalidTimestamp: string | undefined = decoded[0]?.timestamp;
+// @ts-expect-error dateColumns must be keys of the inferred row
+selected.decodeJSON({ data: [] }, ["not_a_column"]);

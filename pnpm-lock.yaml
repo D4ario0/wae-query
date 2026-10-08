@@ -109,11 +109,17 @@ importers:
 
   .:
     devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20261006.1
+        version: 5.20261006.1
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
 
 packages:
+
+  '@cloudflare/workers-types@5.20261006.1':
+    resolution: {integrity: sha512-5OclwQK1d8f5LCPvOlyldC3ryKLUa4nLXegcgPZeUxAPudczQ9xujJDdpS2Tenp7JqbBLW3OgGciHJmuc7QShg==}
 
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
@@ -121,5 +127,7 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@cloudflare/workers-types@5.20261006.1': {}
 
   typescript@6.0.3: {}

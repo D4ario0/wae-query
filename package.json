@@ -1,6 +1,6 @@
 {
   "name": "wae-query",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Type-safe SQL query builder for WAE datasets.",
   "keywords": [
     "click-house",
@@ -48,7 +48,16 @@
     "test:types": "tsc -p tsconfig.test.json",
     "prepack": "pnpm run build"
   },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/workers-types": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
     "typescript": "^6.0.3"
   },
   "packageManager": "pnpm@12.1.0"

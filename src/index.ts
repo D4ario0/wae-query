@@ -1,5 +1,4 @@
 export type Scalar = string | number | boolean | null;
-export type WAEFormat = "JSON" | "JSONEachRow" | "TabSeparated";
 export type OrderDirection = "ASC" | "DESC";
 export type IntervalUnit =
   "SECOND" | "MINUTE" | "HOUR" | "DAY" | "MONTH" | "YEAR";
@@ -73,7 +72,6 @@ export type WAEColumnName =
   | WAEDoubleColumnName;
 export type WAEDataPointValue = string | ArrayBuffer | null;
 
-const WAE_FORMATS = new Set<WAEFormat>(["JSON", "JSONEachRow", "TabSeparated"]);
 const ORDER_DIRECTIONS = new Set<OrderDirection>(["ASC", "DESC"]);
 const INTERVAL_UNITS = new Set<IntervalUnit>([
   "SECOND",
@@ -206,6 +204,10 @@ function decodeDateTime(value: unknown, name: string): Date {
 }
 
 const IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// A dataset path for the Analytics SQL binding, e.g. events.analyticsEngine."example-dataset".
+// Each dot-separated segment is a bare identifier or a double-quoted ("" escaped) string.
+const TABLE_SEGMENT = `(?:[A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")+")`;
+const TABLE_IDENTIFIER_REGEX = new RegExp(`^${TABLE_SEGMENT}(?:\\.${TABLE_SEGMENT})*$`);
 
 function isSQLNode(value: unknown): value is SQLNode {
   return typeof value === "object" && value !== null && "sql" in value;
@@ -214,6 +216,17 @@ function isSQLNode(value: unknown): value is SQLNode {
 function safeIdent(value: string) {
   if (!IDENTIFIER_REGEX.test(value)) {
     throw new Error(`Invalid SQL identifier: ${value}`);
+  }
+
+  return value;
+}
+
+/** Validates a (possibly schema-qualified) dataset path for the binding, e.g.
+ * `events.analyticsEngine."example-dataset"`. Column names use `safeIdent` instead.
+ */
+function safeTableIdent(value: string) {
+  if (!TABLE_IDENTIFIER_REGEX.test(value)) {
+    throw new Error(`Invalid SQL table identifier: ${value}`);
   }
 
   return value;
@@ -230,14 +243,6 @@ function safeInt(value: number, name: string) {
 function safeOrderDirection(value: OrderDirection) {
   if (!ORDER_DIRECTIONS.has(value)) {
     throw new Error(`Invalid order direction: ${value}`);
-  }
-
-  return value;
-}
-
-function safeFormat(value: WAEFormat) {
-  if (!WAE_FORMATS.has(value)) {
-    throw new Error(`Invalid WAE format: ${value}`);
   }
 
   return value;
@@ -324,7 +329,7 @@ export function dataset<T extends Record<string, string>>(
   table: string,
   columns: T,
 ): Dataset<T> {
-  safeIdent(table);
+  safeTableIdent(table);
 
   const out = {
     table,
@@ -468,10 +473,9 @@ export class Query<Row = unknown> {
   private havings: string[] = [];
   private orders: string[] = [];
   private limitValue: number | "ALL" | undefined;
-  private outputFormat: WAEFormat | undefined;
 
   constructor(private readonly table: string) {
-    safeIdent(table);
+    safeTableIdent(table);
   }
 
   private copy<NextRow = Row>(): Query<NextRow> {
@@ -482,7 +486,6 @@ export class Query<Row = unknown> {
     query.havings = [...this.havings];
     query.orders = [...this.orders];
     query.limitValue = this.limitValue;
-    query.outputFormat = this.outputFormat;
     return query;
   }
 
@@ -540,50 +543,33 @@ export class Query<Row = unknown> {
     return query;
   }
 
-  format(value: WAEFormat): Query<Row> {
-    const query = this.copy();
-    query.outputFormat = safeFormat(value);
-    return query;
-  }
-
-  /** Decode a parsed FORMAT JSON envelope. Only DateTime values are converted.
-   * Other values retain the trusted Row contract; this is not row validation.
+  /** Decode an AnalyticsSQLBinding response (`{ data, rows, statistics }`).
+   * The binding has no column metadata, so DateTime columns can't be inferred:
+   * name every column that should decode to `Date` in `dateColumns`. Other
+   * values retain the trusted Row contract; this is not row validation.
    */
-  decodeJSON(payload: unknown): Row[] {
-    if (!isRecord(payload) || !Array.isArray(payload.meta) || !Array.isArray(payload.data)) {
-      throw new Error("Expected a FORMAT JSON response with meta and data arrays");
+  decodeJSON(payload: unknown, dateColumns: ReadonlyArray<Extract<keyof Row, string>> = []): Row[] {
+    if (!isRecord(payload) || !Array.isArray(payload.data)) {
+      throw new Error("Expected a binding response with a data array");
     }
 
-    const names = new Set<string>();
-    const dates: Array<{ name: string; nullable: boolean }> = [];
-    for (const column of payload.meta) {
-      if (!isRecord(column) || typeof column.name !== "string" ||
-        typeof column.type !== "string" || names.has(column.name)) {
-        throw new Error("Invalid FORMAT JSON column metadata");
-      }
-      names.add(column.name);
-      const nullable = column.type.startsWith("Nullable(") && column.type.endsWith(")");
-      const type = nullable ? column.type.slice(9, -1) : column.type;
-      if (type === "DateTime" || type === "DateTime('UTC')" || type === "DateTime('Etc/UTC')") {
-        dates.push({ name: column.name, nullable });
-      } else if (type.startsWith("DateTime")) {
-        throw new Error(`Unsupported DateTime metadata type: ${column.type}`);
-      }
+    if (dateColumns.length === 0) {
+      return payload.data as Row[];
     }
 
     return payload.data.map((row: unknown) => {
       if (!isRecord(row)) {
-        throw new Error("Expected a FORMAT JSON row object");
+        throw new Error("Expected a binding response row object");
       }
       const decoded = { ...row };
-      for (const { name, nullable } of dates) {
+      for (const name of dateColumns) {
         if (!Object.hasOwn(row, name)) {
           throw new Error(`Missing DateTime column: ${name}`);
         }
         const value = row[name];
         // Define an own data property even for aliases such as __proto__.
         Object.defineProperty(decoded, name, {
-          value: nullable && value === null ? null : decodeDateTime(value, name),
+          value: value === null ? null : decodeDateTime(value, name),
           enumerable: true,
           configurable: true,
           writable: true,
@@ -593,19 +579,21 @@ export class Query<Row = unknown> {
     });
   }
 
-  toSQL(format: WAEFormat = this.outputFormat ?? "JSON") {
-    format = safeFormat(format);
+  /** Builds a SQL `SELECT` statement for the Analytics SQL binding.
+   * Do not append a `FORMAT` clause: the binding always returns the default
+   * `{ data, rows, statistics }` JSON shape and rejects explicit formats.
+   */
+  toSQL() {
     const select = this.selects.length ? this.selects.join(", ") : "*";
 
     return [
       `SELECT ${select}`,
-      `FROM ${safeIdent(this.table)}`,
+      `FROM ${safeTableIdent(this.table)}`,
       this.wheres.length ? `WHERE ${this.wheres.join(" AND ")}` : "",
       this.groups.length ? `GROUP BY ${this.groups.join(", ")}` : "",
       this.havings.length ? `HAVING ${this.havings.join(" AND ")}` : "",
       this.orders.length ? `ORDER BY ${this.orders.join(", ")}` : "",
       this.limitValue === undefined ? "" : `LIMIT ${this.limitValue}`,
-      `FORMAT ${format}`,
     ]
       .filter(Boolean)
       .join("\n");
