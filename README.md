@@ -30,16 +30,27 @@
 > confirmed against a live `env.ANALYTICS_SQL.query()` response — see
 > [Decode timestamp results](#decode-timestamp-results) below before relying on
 > it in production.
+>
+> **Corrected in v1.0.0:** `WAE_BASE_COLUMNS.sampleInterval` previously hardcoded
+> Analytics Engine's native HTTP column name, `_sample_interval`. The binding's
+> catalog names it `sampleInterval` (camelCase). Every `sampled.count()` /
+> `sampled.sum()` / `sampled.avg()` / `sampled.quantile()` call, and the bare
+> `col("_sample_interval")` pattern if you wrote one by hand, now needs the new
+> name. This is emitted unquoted; **unverified** whether the binding's catalog
+> case-folds unquoted identifiers to lowercase (which would make bare
+> `sampleInterval` resolve to a nonexistent `sampleinterval`) — confirm against
+> a live binding before relying on the sampled helpers in production, and quote
+> the identifier if the query fails with a column-not-found error.
 
 A small TypeScript query builder for the Cloudflare [Analytics SQL binding](https://developers.cloudflare.com/analytics/sql-api/workers-binding/)
 (`env.ANALYTICS_SQL.query()`), targeting Workers Analytics Engine datasets.
 
 It focuses on the parts that are easy to get wrong by hand:
 
-- stable column names for `blob1`-`blob20`, `double1`-`double20`, `index1`, `timestamp`, and `_sample_interval`
+- stable column names for `blob1`-`blob20`, `double1`-`double20`, `index1`, `timestamp`, and `sampleInterval`
 - typed dataset definitions, including schema-qualified binding paths such as `events.analyticsEngine."my-dataset"`
 - safe identifier and literal handling for common query patterns
-- helpers for sampled aggregations using `_sample_interval`
+- helpers for sampled aggregations using `sampleInterval`
 
 This package builds SQL strings for `env.ANALYTICS_SQL.query({ query })` and can
 decode declared `DateTime` columns from the binding's response. It does not call
@@ -91,7 +102,7 @@ console.log(sql);
 Outputs:
 
 ```sql
-SELECT index1 AS tenant, SUM(_sample_interval) AS requests
+SELECT index1 AS tenant, SUM(sampleInterval) AS requests
 FROM analytics
 WHERE timestamp > NOW() - INTERVAL '7' DAY
 GROUP BY index1
@@ -108,7 +119,7 @@ analytics.doubles.requests.sql; // "double1"
 analytics.doubles.latency.sql; // "double2"
 analytics.indexes.tenant.sql; // "index1"
 analytics.timestamp.sql; // "timestamp"
-analytics.sampleInterval.sql; // "_sample_interval"
+analytics.sampleInterval.sql; // "sampleInterval"
 ```
 
 ## Query a dataset
@@ -136,7 +147,7 @@ const sql = analytics
 Outputs:
 
 ```sql
-SELECT index1 AS tenant, SUM(_sample_interval) AS requests
+SELECT index1 AS tenant, SUM(sampleInterval) AS requests
 FROM analytics
 WHERE timestamp > NOW() - INTERVAL '7' DAY
 GROUP BY index1
@@ -302,22 +313,22 @@ returns `Query<Row>`, not a polymorphic subclass `this`.
 
 ## Sampling helpers
 
-Workers Analytics Engine may sample data. Cloudflare exposes the sampling rate in `_sample_interval`.
+Workers Analytics Engine may sample data. Cloudflare exposes the sampling rate in `sampleInterval`.
 
-Defined datasets include `sampled` helpers bound to their `_sample_interval` column:
+Defined datasets include `sampled` helpers bound to their `sampleInterval` column:
 
 ```ts
 analytics.sampled.count();
-// SUM(_sample_interval)
+// SUM(sampleInterval)
 
 analytics.sampled.sum(analytics.doubles.requests);
-// SUM(double1 * _sample_interval)
+// SUM(double1 * sampleInterval)
 
 analytics.sampled.avg(analytics.doubles.latency);
-// SUM(double2 * _sample_interval) / SUM(_sample_interval)
+// SUM(double2 * sampleInterval) / SUM(sampleInterval)
 
 analytics.sampled.quantile(0.95, analytics.doubles.latency);
-// quantileExactWeighted(0.95)(double2, _sample_interval)
+// quantileExactWeighted(0.95)(double2, sampleInterval)
 ```
 
 Standalone helpers such as `sampledCount`, `sampledSum`, `sampledAvg`, and `quantileExactWeighted` are also exported for lower-level use.

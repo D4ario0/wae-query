@@ -6,7 +6,12 @@ export type IntervalUnit =
 export const WAE_BASE_COLUMNS = {
   dataset: "dataset",
   timestamp: "timestamp",
-  sampleInterval: "_sample_interval",
+  // The Analytics SQL binding's unified catalog names this column
+  // `sampleInterval` (camelCase), not Analytics Engine's native
+  // `_sample_interval`. Kept bare/unquoted here; if the binding's catalog
+  // case-folds unquoted identifiers to lowercase this will need quoting
+  // (unverified against a live binding, see README).
+  sampleInterval: "sampleInterval",
 } as const;
 
 export const WAE_INDEX_COLUMNS = {
@@ -162,7 +167,7 @@ export type DefinedDataset<
   };
   readonly dataset: Column<string, "dataset">;
   readonly timestamp: Column<Date, "timestamp">;
-  readonly sampleInterval: Column<number, "_sample_interval">;
+  readonly sampleInterval: Column<number, "sampleInterval">;
   readonly sampled: SampledHelpers;
   readonly blobs: ColumnsForNames<TBlobs, WAEBlobColumnName, string>;
   readonly doubles: ColumnsForNames<TDoubles, WAEDoubleColumnName, number>;
@@ -391,7 +396,7 @@ export function defineDataset<
   const baseDataset = dataset(definition.name, columnsFlat);
   const datasetColumn = col<string, "dataset">(WAE_BASE_COLUMNS.dataset);
   const timestamp = col<Date, "timestamp">(WAE_BASE_COLUMNS.timestamp);
-  const sampleInterval = col<number, "_sample_interval">(
+  const sampleInterval = col<number, "sampleInterval">(
     WAE_BASE_COLUMNS.sampleInterval,
   );
   const sampled = {

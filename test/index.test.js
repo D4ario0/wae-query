@@ -205,7 +205,7 @@ describe("WAE dataset definitions", () => {
 
 describe("ClickHouse helpers", () => {
   const duration = col("duration");
-  const sampleInterval = col("_sample_interval");
+  const sampleInterval = col("sampleInterval");
   const timestamp = col("timestamp");
 
   it("builds aggregation helpers", () => {
@@ -214,10 +214,10 @@ describe("ClickHouse helpers", () => {
     assert.equal(count().sql, "COUNT()");
     assert.equal(count(duration).sql, "COUNT(duration)");
     assert.equal(countDistinct(duration).sql, "COUNT(DISTINCT duration)");
-    assert.equal(sampledCount(sampleInterval).sql, "SUM(_sample_interval)");
-    assert.equal(sampledSum(duration, sampleInterval).sql, "SUM(duration * _sample_interval)");
-    assert.equal(sampledAvg(duration, sampleInterval).sql, "SUM(duration * _sample_interval) / SUM(_sample_interval)");
-    assert.equal(quantileExactWeighted(0.95, duration, sampleInterval).sql, "quantileExactWeighted(0.95)(duration, _sample_interval)");
+    assert.equal(sampledCount(sampleInterval).sql, "SUM(sampleInterval)");
+    assert.equal(sampledSum(duration, sampleInterval).sql, "SUM(duration * sampleInterval)");
+    assert.equal(sampledAvg(duration, sampleInterval).sql, "SUM(duration * sampleInterval) / SUM(sampleInterval)");
+    assert.equal(quantileExactWeighted(0.95, duration, sampleInterval).sql, "quantileExactWeighted(0.95)(duration, sampleInterval)");
   });
 
   it("builds date/time helpers", () => {
@@ -373,7 +373,7 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
   it("exports the documented WAE base column names", () => {
     assert.equal(WAE_BASE_COLUMNS.dataset, "dataset");
     assert.equal(WAE_BASE_COLUMNS.timestamp, "timestamp");
-    assert.equal(WAE_BASE_COLUMNS.sampleInterval, "_sample_interval");
+    assert.equal(WAE_BASE_COLUMNS.sampleInterval, "sampleInterval");
     assert.equal(WAE_INDEX_COLUMNS.index, "index1");
     assert.equal(WAE_BLOB_COLUMNS.blob20, "blob20");
     assert.equal(WAE_DOUBLE_COLUMNS.double20, "double20");
@@ -384,7 +384,7 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
 
     assert.equal(analytics.dataset.sql, "dataset");
     assert.equal(analytics.timestamp.sql, "timestamp");
-    assert.equal(analytics.sampleInterval.sql, "_sample_interval");
+    assert.equal(analytics.sampleInterval.sql, "sampleInterval");
     assert.equal(analytics.indexes.tenant.sql, "index1");
   });
 
@@ -430,7 +430,7 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
       .where(gt(temperatures.timestamp, intervalAgo(7, "DAY")))
       .groupBy(temperatures.indexes.location_id)
       .toSQL(), [
-      "SELECT index1 AS location_id, SUM(_sample_interval) AS n_readings",
+      "SELECT index1 AS location_id, SUM(sampleInterval) AS n_readings",
       "FROM temperatures",
       "WHERE timestamp > NOW() - INTERVAL '7' DAY",
       "GROUP BY index1",
@@ -452,7 +452,7 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
       .where(gt(temperatures.timestamp, intervalAgo(7, "DAY")))
       .groupBy(temperatures.indexes.location_id)
       .toSQL(), [
-      "SELECT index1 AS location_id, SUM(double1 * _sample_interval) / SUM(_sample_interval) AS average_temp",
+      "SELECT index1 AS location_id, SUM(double1 * sampleInterval) / SUM(sampleInterval) AS average_temp",
       "FROM temperatures",
       "WHERE timestamp > NOW() - INTERVAL '7' DAY",
       "GROUP BY index1",
@@ -467,7 +467,7 @@ describe("Cloudflare Workers Analytics Engine documented behavior", () => {
 
     assert.equal(
       quantileExactWeighted(0.99, analytics.doubles.latency, analytics.sampleInterval).sql,
-      "quantileExactWeighted(0.99)(double1, _sample_interval)",
+      "quantileExactWeighted(0.99)(double1, sampleInterval)",
     );
   });
 
@@ -504,15 +504,15 @@ describe("dataset-bound sampled helpers", () => {
       doubles: ["requests", "latency"],
     });
 
-    assert.equal(analytics.sampled.count().sql, "SUM(_sample_interval)");
-    assert.equal(analytics.sampled.sum(analytics.doubles.requests).sql, "SUM(double1 * _sample_interval)");
+    assert.equal(analytics.sampled.count().sql, "SUM(sampleInterval)");
+    assert.equal(analytics.sampled.sum(analytics.doubles.requests).sql, "SUM(double1 * sampleInterval)");
     assert.equal(
       analytics.sampled.avg(analytics.doubles.latency).sql,
-      "SUM(double2 * _sample_interval) / SUM(_sample_interval)",
+      "SUM(double2 * sampleInterval) / SUM(sampleInterval)",
     );
     assert.equal(
       analytics.sampled.quantile(0.95, analytics.doubles.latency).sql,
-      "quantileExactWeighted(0.95)(double2, _sample_interval)",
+      "quantileExactWeighted(0.95)(double2, sampleInterval)",
     );
   });
 
@@ -531,7 +531,7 @@ describe("dataset-bound sampled helpers", () => {
       })
       .groupBy(analytics.indexes.tenant)
       .toSQL(), [
-      "SELECT index1 AS tenant, SUM(_sample_interval) AS requests, SUM(double1 * _sample_interval) / SUM(_sample_interval) AS avg_latency",
+      "SELECT index1 AS tenant, SUM(sampleInterval) AS requests, SUM(double1 * sampleInterval) / SUM(sampleInterval) AS avg_latency",
       "FROM analytics",
       "GROUP BY index1",
     ].join("\n"));
