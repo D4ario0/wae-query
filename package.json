@@ -1,6 +1,6 @@
 {
   "name": "wae-query",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Type-safe SQL query builder for WAE datasets.",
   "keywords": [
     "click-house",
